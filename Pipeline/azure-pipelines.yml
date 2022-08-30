@@ -1,0 +1,112 @@
+# Extensão do SpecFlow+LivingDoc no Marketplace:
+# https://marketplace.visualstudio.com/items?itemName=techtalk.techtalk-specflow-plus
+
+# Configurando o uso do SpecFlow+LivingDoc em um YAML Pipeline:
+# https://docs.specflow.org/projects/specflow-livingdoc/en/latest/Generating/Configuring-the-Build-Step-in-YAML.html
+
+trigger:
+- main
+
+resources:
+- repo: self
+
+variables:
+
+  # Container registry service connection established during pipeline creation
+  dockerRegistryServiceConnection: 'ID CONNECTION ACR'
+  imageRepository: 'testesconversor'
+  containerRegistry: 'resource.azurecr.io'
+  dockerfilePath: '**/Dockerfile'
+  tag: '$(Build.BuildId)'
+  imagePullSecret: 'namesecret-auth'
+
+  # Agent VM image name
+  vmImageName: 'ubuntu-latest'
+  
+  # Configurações para geração de LivingDoc do SpecFlow
+  dllProjectTests: '**/Release/ConversorDistancias.Specs.dll'
+  pathJsonTestExecution: '**/Release/TestExecution.json'
+
+stages:
+- stage: BuildAndTestes
+  displayName: Build and Tests stage
+  jobs:
+  - job: BuildAndTestes
+    displayName: BuildAndTestes
+    pool:
+      vmImage: $(vmImageName)
+    steps:
+    - task: Docker@2
+      displayName: Build da imagem
+      inputs:
+        command: buildAndPush
+        repository: $(imageRepository)
+        dockerfile: $(dockerfilePath)
+        containerRegistry: $(dockerRegistryServiceConnection)
+        tags: |
+          $(tag)
+          latest
+    - script: |
+        docker run --name sitetests -p 1234:80 -d $(containerRegistry)/$(imageRepository):latest
+        docker container ls
+      displayName: Criar container da aplicação para testes
+    - task: DotNetCoreCLI@2
+      displayName: Executar testes do SpecFlow
+      inputs:
+        command: 'test'
+        projects: '**/ConversorDistancias.Specs.csproj'
+        arguments: '-c Release -o Release'
+      env:
+        UrlConversaoDistancias: http://localhost:1234
+    - task: SpecFlowPlus@0
+      displayName: Gerar LivingDoc do SpecFlow
+      inputs:
+        generatorSource: 'TestAssembly'
+        testAssemblyFilePath: '$(dllProjectTests)'
+        testExecutionJson: '$(pathJsonTestExecution)'
+        projectLanguage: 'pt'
+      condition: always()
+    - task: Docker@2
+      displayName: Push da imagem para o Azure Container Registry
+      inputs:
+        command: buildAndPush
+        repository: $(imageRepository)
+        dockerfile: $(dockerfilePath)
+        containerRegistry: $(dockerRegistryServiceConnection)
+        tags: |
+          $(tag)
+
+    - upload: manifests
+      artifact: manifests
+
+- stage: Deploy
+  displayName: Deploy stage
+  dependsOn: BuildAndTestes
+
+  jobs:
+  - deployment: Deploy
+    displayName: Deploy
+    pool:
+      vmImage: $(vmImageName)
+    environment: 'TestesConversor.distancias'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: KubernetesManifest@0
+            displayName: Create imagePullSecret
+            inputs:
+              action: createSecret
+              secretName: $(imagePullSecret)
+              dockerRegistryEndpoint: $(dockerRegistryServiceConnection)
+          - task: KubernetesManifest@0
+            displayName: Deployment no Azure Kubernetes Service (AKS)
+            inputs:
+              action: deploy
+              manifests: |
+                $(Pipeline.Workspace)/manifests/deployment.yml
+                $(Pipeline.Workspace)/manifests/service.yml
+              imagePullSecrets: |
+                $(imagePullSecret)
+              containers: |
+                $(containerRegistry)/$(imageRepository):$(tag)
