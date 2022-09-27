@@ -22,6 +22,11 @@ variables:
 
   # Agent VM image name
   vmImageName: 'ubuntu-latest'
+
+  # Configurações para execução da aplicação em background
+  File_Log_Execution_WebApp: 'log-execution-site.log'
+  Path_Project: './ConversorDistancias'
+  Dll_Project: 'ConversorDistancias.dll'
   
   # Configurações para geração de LivingDoc do SpecFlow
   dllProjectTests: '**/Release/ConversorDistancias.Specs.dll'
@@ -36,20 +41,15 @@ stages:
     pool:
       vmImage: $(vmImageName)
     steps:
-    - task: Docker@2
-      displayName: Build da imagem
-      inputs:
-        command: buildAndPush
-        repository: $(imageRepository)
-        dockerfile: $(dockerfilePath)
-        containerRegistry: $(dockerRegistryServiceConnection)
-        tags: |
-          $(tag)
-          latest
     - script: |
-        docker run --name sitetests -p 1234:80 -d $(containerRegistry)/$(imageRepository):latest
-        docker container ls
-      displayName: Criar container da aplicação para testes
+        dotnet publish $(Path_Project) -c Release -o app
+        cd ./app
+        nohup dotnet $(Dll_Project) > $(File_Log_Execution_WebApp) 2>&1 &
+        echo 'Aguardando a inicialização da aplicação a ser testada...'
+        sleep 10s
+      displayName: Executar a aplicação a ser testada em background (nohup)
+      env:
+        ASPNETCORE_URLS: 'http://localhost:1234'
     - task: DotNetCoreCLI@2
       displayName: Executar testes do SpecFlow
       inputs:
@@ -67,14 +67,15 @@ stages:
         projectLanguage: 'pt'
       condition: always()
     - task: Docker@2
-      displayName: Push da imagem para o Azure Container Registry
+      displayName: Build e Push para o Azure Container Registry
       inputs:
-        command: buildAndPush
-        repository: $(imageRepository)
-        dockerfile: $(dockerfilePath)
-        containerRegistry: $(dockerRegistryServiceConnection)
+        containerRegistry: '$(dockerRegistryServiceConnection)'
+        repository: '$(imageRepository)'
+        command: 'buildAndPush'
+        Dockerfile: '**/Dockerfile'
         tags: |
           $(tag)
+          latest
 
     - upload: manifests
       artifact: manifests
